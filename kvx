@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+import os
+import sys
+import json
+import argparse
+
+VERSION = "0.1.0"
+
+# Terminal Renk Kodları (ANSI)
+GREEN = "\033[92m"
+YELLOW = "\033[93m"
+RED = "\033[91m"
+BLUE = "\033[94m"
+CYAN = "\033[96m"
+RESET = "\033[0m"
+BOLD = "\033[1m"
+
+def print_logo():
+    print(f"{BLUE}{BOLD}    _  __    _  __{RESET}")
+    print(f"{BLUE}{BOLD}   | |/ /   | |/ /{RESET}")
+    print(f"{BLUE}{BOLD}   | ' /    | ' / {RESET}")
+    print(f"{BLUE}{BOLD}   | . \\    | . \\ {RESET}")
+    print(f"{BLUE}{BOLD}   |_|\\_\\   |_|\\_\\  v{VERSION}{RESET}")
+    print(f"{CYAN}KuvixOS SDK & Build Management Tool{RESET}\n")
+
+def interactive_menu(title, options):
+    """Sıfır kütüphaneyle yön tuşlu interaktif seçim menüsü"""
+    current_idx = 0
+    # Terminal imlecini gizle ve klavye okuma moduna geç (Linux/Fedora için)
+    import tty, termios
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    
+    print(f"{BOLD}? {title}{RESET} (Yön tuşları ile seçin, Enter ile onaylayın)")
+    
+    try:
+        tty.setraw(sys.stdin.fileno())
+        while True:
+            # Seçenekleri yazdır
+            sys.stdout.write("\r")
+            for i, opt in enumerate(options):
+                if i == current_idx:
+                    sys.stdout.write(f"{GREEN}{BOLD}> [x] {opt}{RESET}   ")
+                else:
+                    sys.stdout.write(f"  [ ] {opt}   ")
+            sys.stdout.flush()
+
+            # Tuş oku
+            ch = sys.stdin.read(1)
+            if ch == '\x1b': # Escape dizisi (Yön tuşları için)
+                ch2 = sys.stdin.read(1)
+                ch3 = sys.stdin.read(1)
+                if ch3 == 'D': # Sol ok
+                    current_idx = (current_idx - 1) % len(options)
+                elif ch3 == 'C': # Sağ ok
+                    current_idx = (current_idx + 1) % len(options)
+            elif ch == '\r' or ch == '\n': # Enter
+                break
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        print("\n")
+    
+    return options[current_idx]
+
+def create_project_structure(path, name, p_type, sub_type, version, author):
+    """Seçilen tipe göre klasörleri ve şablon dosyaları jilet gibi oluşturur"""
+    target_dir = os.path.abspath(os.path.join(path, name))
+    
+    if os.path.exists(target_dir):
+        print(f"{RED}[Hata] '{target_dir}' dizini zaten mevcut!{RESET}")
+        return False
+
+    src_dir = os.path.join(target_dir, "src")
+    os.makedirs(src_dir, exist_ok=True)
+
+    # 1. kvx.json Oluşturma
+    kvx_json_data = {
+        "name": name,
+        "type": p_type,
+        "sub_type": sub_type,
+        "version": version,
+        "author": author,
+        "compiler_flags": "-O2 -Wall -Wextra"
+    }
+    with open(os.path.join(target_dir, "kvx.json"), "w", encoding="utf-8") as f:
+        json.dump(kvx_json_data, f, indent=4, ensure_ascii=False)
+
+    # 2. Şablon Kodları Seçme
+    main_code = ""
+    if p_type == "driver":
+        main_code = """#include <kdf.h>
+
+static KernelAPI* k_api = nullptr;
+
+__attribute__((used)) int driver_read(void* buffer, uint32_t size) {
+    (void)buffer; (void)size;
+    return 0;
+}
+
+extern "C" __attribute__((used)) int driver_init(KernelAPI* api, KDF_Operations* ops);
+
+extern "C" {
+    __attribute__((section(".text.head"))) __attribute__((used)) 
+    KDF_Header driver_header = {
+        .magic = KDF_MAGIC,
+        .driver_version = 0x00000001,
+        .driver_name = \"""" + name + """\",
+        .init_offset = (uint32_t)(void*)driver_init, 
+        .exit_offset = 0,
+        .code_size = 0
+    };
+}
+
+extern "C" __attribute__((used)) int driver_init(KernelAPI* api, KDF_Operations* ops) {
+    k_api = api;
+    if (ops) {
+        ops->read = driver_read;
+    }
+    return 0;
+}
+"""
+    elif p_type == "app" and sub_type == "gui":
+        main_code = """#include <dedk.h>
+#include <kvxgfx.h>
+
+int main(int argc, char** argv) {
+    (void)argc; (void)argv;
+    
+    // DEDK üzerinden Grafik Penceresi oluşturma şablonu
+    Window* win = create_window(\"""" + name + """\", 640, 480);
+    if (!win) return -1;
+
+    while (window_is_open(win)) {
+        window_clear(win, 0xFFFFFFFF);
+        draw_text(win, "KuvixOS GUI Uygulaması", 50, 50, 0x00000000);
+        window_present(win);
+    }
+    return 0;
+}
+"""
+    else: # app-cli veya de
+        main_code = """#include <stdio.h>
+
+int main(int argc, char** argv) {
+    (void)argc; (void)argv;
+    printf("Merhaba KuvixOS! Bu bir CLI uygulamasidir.\\n");
+    return 0;
+}
+"""
+
+    with open(os.path.join(src_dir, "main.cpp"), "w", encoding="utf-8") as f:
+        f.write(main_code)
+
+    # 3. Akıllı Makefile Bırakma
+    makefile_content = f"""# kvx tarafından otomatik üretilen derleme motoru
+TARGET = {name}
+TYPE = {p_type}
+SUB_TYPE = {sub_type}
+
+CXX = i686-elf-g++
+OBJCOPY = i686-elf-objcopy
+
+CXXFLAGS = -O2 -Wall -Wextra -ffreestanding -fno-exceptions -fno-rtti
+LDFLAGS = -nostdlib
+
+ifeq ($(TYPE),driver)
+\tOUTPUT = $(TARGET).kdf
+else ifeq ($(SUB_TYPE),gui)
+\tOUTPUT = $(TARGET).kapp
+else
+\tOUTPUT = $(TARGET).bin
+endif
+
+all: $(OUTPUT)
+
+$(OUTPUT): src/main.cpp
+\t$(CXX) $(CXXFLAGS) -c src/main.cpp -o main.o
+\t$(CXX) $(LDFLAGS) main.o -o $(TARGET).elf
+\t$(OBJCOPY) -O binary $(TARGET).elf $(OUTPUT)
+
+clean:
+\trm -f *.o *.elf $(OUTPUT)
+"""
+    with open(os.path.join(target_dir, "Makefile"), "w", encoding="utf-8") as f:
+        f.write(makefile_content)
+
+    print(f"{GREEN}{BOLD}[+][{p_type.upper()}-{sub_type.upper()}] '{target_dir}' başarıyla oluşturuldu!{RESET}")
+    return True
+
+def main():
+    print_logo()
+    
+    parser = argparse.ArgumentParser(description="KuvixOS CLI App & Driver SDK Tool")
+    subparsers = parser.add_subparsers(dest="command")
+
+    # init komutu (Interaktif mod)
+    subparsers.add_parser("init", help="Yeni bir KuvixOS projesini interaktif olarak başlatır")
+
+    # create komutu (Parametreli hızlı mod)
+    create_parser = subparsers.add_parser("create", help="Parametrelerle hızlı proje oluşturur")
+    create_parser.add_argument("-t", "--type", choices=["driver", "app-cli", "app-gui", "de"], required=True, help="Proje türü")
+    create_parser.add_argument("-n", "--name", required=True, help="Proje adı")
+    create_parser.add_argument("-v", "--version", default="1.0.0", help="Proje sürümü")
+    create_parser.add_argument("-a", "--author", default="Anıl Enes Erden", help="Geliştirici adı")
+    create_parser.add_argument("-d", "--dir", default=".", help="Oluşturulacak dizin")
+
+    args = parser.parse_args()
+
+    if args.command == "init":
+        # İnteraktif Seçim Ekranları
+        chosen_type = interactive_menu("Proje Türünü Seçin", ["driver", "app-cli", "app-gui", "de"])
+        p_name = input(f"{BOLD}? Proje Adı (Örn: ps2_mouse): {RESET}").strip()
+        p_version = input(f"{BOLD}? Sürüm (Varsayılan: 1.0.0): {RESET}").strip() or "1.0.0"
+        p_author = input(f"{BOLD}? Geliştirici (Varsayılan: Anıl Enes Erden): {RESET}").strip() or "Anıl Enes Erden"
+        p_dir = input(f"{BOLD}? Klasör Yolu (Varsayılan: mevcut dizin '.'): {RESET}").strip() or "."
+        
+        p_type = "driver" if chosen_type == "driver" else "app" if "app" in chosen_type else chosen_type
+        sub_type = "gui" if "gui" in chosen_type else "cli"
+        
+        create_project_structure(p_dir, p_name, p_type, sub_type, p_version, p_author)
+
+    elif args.command == "create":
+        p_type = "driver" if args.type == "driver" else "app" if "app" in args.type else args.type
+        sub_type = "gui" if "gui" in args.type else "cli"
+        create_project_structure(args.dir, args.name, p_type, sub_type, args.version, args.author)
+        
+    else:
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()
