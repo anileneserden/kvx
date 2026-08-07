@@ -426,7 +426,113 @@ public:
         with open(os.path.join(include_dir, "input.h"), "w", encoding="utf-8") as f:
             f.write(hpp_input_code)
 
-        # 7. src/lib/draw_text.cpp
+        # 7 include/lib/cursor.h (Yeni Eklenen Modüler İmleç Header Dosyası)
+        hpp_cursor_code = """#ifndef LIB_CURSOR_H
+#define LIB_CURSOR_H
+
+#include <kernel/drivers/video/de_api.h>
+#include <stdint.h>
+
+typedef struct {
+    int old_x;
+    int old_y;
+    int width;
+    int height;
+    uint32_t bg_color;
+    const char* path;
+} CursorState;
+
+void cursor_init(CursorState* state, const char* path, int w, int h, uint32_t bg_color);
+void cursor_render(DE_API* api, CursorState* state);
+
+#endif
+"""
+        with open(os.path.join(include_dir, "cursor.h"), "w", encoding="utf-8") as f:
+            f.write(hpp_cursor_code)
+
+        # 8. include/window.hpp (Yeni Eklenen Pencere Sınıfı)
+        hpp_window_code = """#ifndef WINDOW_HPP
+#define WINDOW_HPP
+
+#include <kernel/drivers/video/de_api.h>
+#include <stdint.h>
+
+class Window {
+public:
+    int x, y;
+    int width, height;
+    int header_height;
+    int dragging;
+    int drag_offset_x, drag_offset_y;
+    int is_open;
+
+    uint32_t bg_color;
+    uint32_t header_color;
+    uint32_t border_color;
+
+    Window(int wx, int wy, int ww, int wh)  
+        : x(wx), y(wy), width(ww), height(wh),  
+          header_height(24), dragging(0),  
+          drag_offset_x(0), drag_offset_y(0), is_open(1),
+          bg_color(0x002B2D42), header_color(0x001D1E2C), border_color(0x004A4E69) {}
+
+    void update(const de_mouse_state_t& mouse) {
+        if (!is_open) return;
+
+        if (mouse.left_button == 1) {
+            if (dragging == 0) {
+                if (mouse.x >= x && mouse.x <= (x + width) &&
+                    mouse.y >= y && mouse.y <= (y + header_height)) {
+                    
+                    int close_x = x + width - header_height;
+                    if (mouse.x >= close_x && mouse.x <= (x + width)) {
+                        is_open = 0;
+                        return;
+                    }
+
+                    dragging = 1;
+                    drag_offset_x = mouse.x - x;
+                    drag_offset_y = mouse.y - y;
+                }
+            } else {
+                int new_x = mouse.x - drag_offset_x;
+                int new_y = mouse.y - drag_offset_y;
+
+                if (new_x < 0) new_x = 0;
+                if (new_y < 0) new_y = 0;
+                if (new_x > 800 - width) new_x = 800 - width;
+                if (new_y > 600 - height) new_y = 600 - height;
+
+                x = new_x;
+                y = new_y;
+            }
+        } else {
+            dragging = 0;
+        }
+    }
+
+    void draw(DE_API* api) {
+        if (!is_open || !api || !api->draw_rect) return;
+
+        api->draw_rect(x - 2, y - 2, width + 4, height + 4, border_color);
+        api->draw_rect(x, y, width, height, bg_color);
+
+        uint32_t active_header = (dragging == 1) ? 0x003D405B : header_color;
+        api->draw_rect(x, y, width, header_height, active_header);
+
+        int btn_size = 14;
+        int btn_x = x + width - header_height + (header_height - btn_size) / 2;
+        int btn_y = y + (header_height - btn_size) / 2;
+        api->draw_rect(btn_x, btn_y, btn_size, btn_size, 0x00E63946);
+    }
+};
+
+#endif // WINDOW_HPP
+"""
+        with open(os.path.join(include_dir, "window.hpp"), "w", encoding="utf-8") as f:
+            f.write(hpp_window_code)
+
+        # 9. src/lib/draw_text.cpp
         cpp_draw_code = r"""#include "../../include/draw_text.hpp"
 
 void draw_text_safe_internal(DE_API* api, int x, int y, const char* str, uint32_t color) {
@@ -451,7 +557,7 @@ void draw_text_safe_internal(DE_API* api, int x, int y, const char* str, uint32_
         with open(os.path.join(lib_dir, "draw_text.cpp"), "w", encoding="utf-8") as f:
             f.write(cpp_draw_code)
 
-        # 8. src/lib/input.cpp
+        # 10. src/lib/input.cpp
         cpp_input_code = """#include "../../include/input.h"
 
 uint8_t Input::modifiers = MOD_NONE;
@@ -505,29 +611,64 @@ bool Input::is_combo(uint8_t modifier_flags, uint8_t key) {
         with open(os.path.join(lib_dir, "input.cpp"), "w", encoding="utf-8") as f:
             f.write(cpp_input_code)
 
-        # 9. src/main.cpp
+        # 11 src/lib/cursor.cpp (Yeni Eklenen Modüler İmleç Mantığı)
+        cpp_cursor_code = """#include "../../include/cursor.h"
+
+void cursor_init(CursorState* state, const char* path, int w, int h, uint32_t bg_color) {
+    state->path = path;
+    state->width = w;
+    state->height = h;
+    state->bg_color = bg_color;
+    state->old_x = -9999;
+    state->old_y = -9999;
+}
+
+void cursor_render(DE_API* api, CursorState* state) {
+    de_mouse_state_t mouse;
+    api->get_mouse(&mouse);
+
+    if (mouse.x != state->old_x || mouse.y != state->old_y) {
+        if (state->old_x != -9999) {
+            api->draw_rect(state->old_x, state->old_y, state->width, state->height, state->bg_color);
+            api->dmg_union_replace(state->old_x, state->old_y, state->old_x + state->width, state->old_y + state->height);
+        }
+
+        api->render_kbi(mouse.x, mouse.y, state->path);
+        api->dmg_union_replace(mouse.x, mouse.y, mouse.x + state->width, mouse.y + state->height);
+
+        state->old_x = mouse.x;
+        state->old_y = mouse.y;
+    }
+}
+"""
+        with open(os.path.join(lib_dir, "cursor.cpp"), "w", encoding="utf-8") as f:
+            f.write(cpp_cursor_code)
+
+        # 12. src/main.cpp
         main_code = r"""#include <kernel/drivers/video/de_api.h>
+#include <cursor.h>
 
 extern "C" void app_main(DE_API* api) {
     if (!api) return;
 
-    // Ekranı koyu mor/mavi renkle temizle (0x002B2D42)
-    if (api->clear_screen) {
-        api->clear_screen(0x002B2D42);
-    }
+    uint32_t bg_color = 0x002B2D42; // Koyu mor/mavi arka plan
 
-    // Çift tamponu (double buffer) ekrana yansıt
+    CursorState cursor;
+    cursor_init(&cursor, "/sys/themes/arrow-cursor.kbi", 16, 16, bg_color);
+
+    if (api->clear_screen) {
+        api->clear_screen(bg_color);
+    }
     if (api->update_display) {
         api->update_display();
     }
 
-    // Hemen TTY'ye geri dönmemesi için bir tuşa basılmasını bekle
-    if (api->get_key) {
-        while (true) {
+    while (true) {
+        cursor_render(api, &cursor);
+
+        if (api->get_key) {
             char k = api->get_key();
-            if (k != 0) {
-                break;
-            }
+            if (k == 27) break; // ESC ile çıkış
         }
     }
 }
