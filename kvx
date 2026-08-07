@@ -3,10 +3,11 @@ import os
 import sys
 import json
 import argparse
+import subprocess
+import shutil
 
-VERSION = "0.1.0"
+VERSION = "0.1.8"
 
-# Terminal Renk Kodları (ANSI)
 GREEN = "\033[92m"
 YELLOW = "\033[93m"
 RED = "\033[91m"
@@ -14,6 +15,9 @@ BLUE = "\033[94m"
 CYAN = "\033[96m"
 RESET = "\033[0m"
 BOLD = "\033[1m"
+
+SDK_DIR = os.path.expanduser("~/.kuvix/sdk")
+SDK_INCLUDE_DIR = os.path.join(SDK_DIR, "include")
 
 def print_logo():
     print(f"{BLUE}{BOLD}    _  __    _  __{RESET}")
@@ -23,20 +27,49 @@ def print_logo():
     print(f"{BLUE}{BOLD}   |_|\\_\\   |_|\\_\\  v{VERSION}{RESET}")
     print(f"{CYAN}KuvixOS SDK & Build Management Tool{RESET}\n")
 
+def ensure_sdk_exists():
+    if not os.path.exists(SDK_INCLUDE_DIR):
+        os.makedirs(SDK_INCLUDE_DIR, exist_ok=True)
+
+    dedk_h_path = os.path.join(SDK_INCLUDE_DIR, "dedk.h")
+    if not os.path.exists(dedk_h_path):
+        with open(dedk_h_path, "w", encoding="utf-8") as f:
+            f.write("""#pragma once
+#ifdef __cplusplus
+extern "C" {
+#endif
+typedef struct Window Window;
+Window* create_window(const char* title, int width, int height);
+bool window_is_open(Window* win);
+void window_clear(Window* win, unsigned int color);
+void window_present(Window* win);
+#ifdef __cplusplus
+}
+#endif
+""")
+
+    kvxgfx_h_path = os.path.join(SDK_INCLUDE_DIR, "kvxgfx.h")
+    if not os.path.exists(kvxgfx_h_path):
+        with open(kvxgfx_h_path, "w", encoding="utf-8") as f:
+            f.write("""#pragma once
+#ifdef __cplusplus
+extern "C" {
+#endif
+void draw_text(void* win, const char* text, int x, int y, unsigned int color);
+#ifdef __cplusplus
+}
+#endif
+""")
+
 def interactive_menu(title, options):
-    """Sıfır kütüphaneyle yön tuşlu interaktif seçim menüsü"""
     current_idx = 0
-    # Terminal imlecini gizle ve klavye okuma moduna geç (Linux/Fedora için)
     import tty, termios
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
-    
     print(f"{BOLD}? {title}{RESET} (Yön tuşları ile seçin, Enter ile onaylayın)")
-    
     try:
         tty.setraw(sys.stdin.fileno())
         while True:
-            # Seçenekleri yazdır
             sys.stdout.write("\r")
             for i, opt in enumerate(options):
                 if i == current_idx:
@@ -44,186 +77,574 @@ def interactive_menu(title, options):
                 else:
                     sys.stdout.write(f"  [ ] {opt}   ")
             sys.stdout.flush()
-
-            # Tuş oku
             ch = sys.stdin.read(1)
-            if ch == '\x1b': # Escape dizisi (Yön tuşları için)
-                ch2 = sys.stdin.read(1)
+            if ch == '\x1b':
+                sys.stdin.read(1)
                 ch3 = sys.stdin.read(1)
-                if ch3 == 'D': # Sol ok
+                if ch3 == 'D':
                     current_idx = (current_idx - 1) % len(options)
-                elif ch3 == 'C': # Sağ ok
+                elif ch3 == 'C':
                     current_idx = (current_idx + 1) % len(options)
-            elif ch == '\r' or ch == '\n': # Enter
+            elif ch == '\r' or ch == '\n':
                 break
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
         print("\n")
-    
     return options[current_idx]
 
-def create_project_structure(path, name, p_type, sub_type, version, author):
-    """Seçilen tipe göre klasörleri ve şablon dosyaları jilet gibi oluşturur"""
-    target_dir = os.path.abspath(os.path.join(path, name))
+def build_project(project_dir, clean_first=False):
+    target_dir = os.path.abspath(project_dir)
+    json_path = os.path.join(target_dir, "kvx.json")
     
+    p_type = "app"
+    sub_type = "cli"
+    name = os.path.basename(target_dir)
+    
+    # kvx.json içerisinden bayrakları oku
+    custom_cflags = ""
+    custom_ldflags = ""
+    
+    if os.path.exists(json_path):
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                jdata = json.load(f)
+                p_type = jdata.get("type", "app")
+                sub_type = jdata.get("sub_type", "cli")
+                name = jdata.get("name", name)
+                custom_cflags = jdata.get("compiler_flags", "")
+                custom_ldflags = jdata.get("linker_flags", "")
+        except:
+            pass
+
+    print(f"{CYAN}{BOLD}[*] Proje derleniyor: {target_dir}{RESET}")
+
+    if p_type == "de":
+        # JSON'da linker_flags tanımlıysa onu kullan, yoksa varsayılanı ata
+        ldflags = custom_ldflags if custom_ldflags else "-m elf_i386 -T linker.ld --gc-sections -e _start -s"
+        
+        makefile_content = f"""TARGET = {name}.kde
+KUVIX_SDK_INC = $(HOME)/.kuvix/sdk/include
+AS = i686-elf-as
+CXX = i686-elf-g++
+LD = i686-elf-ld
+
+CXXFLAGS = -m32 -Wa,--32 -march=i386 -c -ffreestanding -fno-pic -fno-pie -mno-sse -mno-mmx -mno-80387 \\
+           -fno-stack-protector -fno-builtin -fno-asynchronous-unwind-tables \\
+           -ffunction-sections -fdata-sections -Iinclude -I$(KUVIX_SDK_INC) \\
+           -fno-rtti -fno-exceptions {custom_cflags}
+
+LDFLAGS = {ldflags}
+
+CPP_SRCS = $(shell find src -type f -name '*.cpp' 2>/dev/null)
+CPP_OBJS = $(patsubst src/%.cpp, build/%.o, $(CPP_SRCS))
+
+ENTRY_OBJ = build/runtime/entry.o
+OBJS = $(ENTRY_OBJ) $(filter-out $(ENTRY_OBJ), $(CPP_OBJS))
+
+.PHONY: all clean
+
+all: $(TARGET)
+
+$(TARGET): $(OBJS)
+\t$(LD) $(LDFLAGS) $(OBJS) -o $(TARGET)
+
+build/runtime/entry.o: src/runtime/entry.s
+\t@mkdir -p $(dir $@)
+\t$(AS) --32 $< -o $@
+
+build/%.o: src/%.cpp
+\t@mkdir -p $(dir $@)
+\t$(CXX) $(CXXFLAGS) $< -o $@
+
+clean:
+\trm -rf build {name}.kde
+"""
+    else:
+        ldflags = custom_ldflags if custom_ldflags else "-m32 -nostdlib"
+        makefile_content = f"""TARGET = {name}
+SUB_TYPE = {sub_type}
+KUVIX_SDK_INC = $(HOME)/.kuvix/sdk/include
+CXX = i686-elf-g++
+CC = i686-elf-gcc
+OBJCOPY = i686-elf-objcopy
+
+CFLAGS = -m32 -march=i386 -pipe -O0 -Wall -Wextra -ffreestanding -fno-stack-protector -fno-pie -I$(KUVIX_SDK_INC) {custom_cflags}
+CXXFLAGS = -m32 -march=i386 -pipe -Wall -Wextra -ffreestanding -fno-exceptions -fno-rtti -fno-stack-protector -fomit-frame-pointer -fno-asynchronous-unwind-tables -fno-pie -fno-pic -fno-ident -I$(KUVIX_SDK_INC) {custom_cflags}
+LDFLAGS = {ldflags}
+
+OUTPUT = $(TARGET).bin
+all: $(OUTPUT)
+$(OUTPUT):
+\t@mkdir -p build
+\t$(CXX) $(CXXFLAGS) -c src/main.cpp -o build/main.o
+\t$(CXX) $(LDFLAGS) build/main.o -o $(TARGET).elf
+\t$(OBJCOPY) -O binary $(TARGET).elf $(OUTPUT)
+clean:
+\trm -rf build/* $(TARGET).elf $(OUTPUT)
+"""
+
+    temp_makefile_path = os.path.join(target_dir, "Makefile")
+    with open(temp_makefile_path, "w", encoding="utf-8") as f:
+        f.write(makefile_content)
+
+    if clean_first:
+        subprocess.run(["make", "clean"], cwd=target_dir)
+
+    result = subprocess.run(["make"], cwd=target_dir)
+
+    if os.path.exists(temp_makefile_path):
+        os.remove(temp_makefile_path)
+
+    if result.returncode == 0:
+        print(f"{GREEN}{BOLD}[+] Derleme başarıyla tamamlandı!{RESET}")
+        return True
+    else:
+        print(f"{RED}{BOLD}[-] Derleme sırasında hata oluştu!{RESET}")
+        return False
+
+def create_project_structure(path, name, p_type, sub_type, version, author):
+    ensure_sdk_exists()
+    target_dir = os.path.abspath(os.path.join(path, name))
+
     if os.path.exists(target_dir):
         print(f"{RED}[Hata] '{target_dir}' dizini zaten mevcut!{RESET}")
         return False
 
     src_dir = os.path.join(target_dir, "src")
+    include_dir = os.path.join(target_dir, "include")
     os.makedirs(src_dir, exist_ok=True)
 
-    # 1. kvx.json Oluşturma
+    # Proje türüne özel varsayılan linker bayrakları
+    default_ldflags = "-m32 -nostdlib"
+    if p_type == "de":
+        default_ldflags = "-m elf_i386 -N -e _start -T linker.ld"
+
     kvx_json_data = {
-        "name": name,
-        "type": p_type,
+        "name": name, 
+        "type": p_type, 
         "sub_type": sub_type,
-        "version": version,
-        "author": author,
-        "compiler_flags": "-O2 -Wall -Wextra"
+        "version": version, 
+        "author": author, 
+        "compiler_flags": "-O2 -Wall -Wextra",
+        "linker_flags": default_ldflags
     }
     with open(os.path.join(target_dir, "kvx.json"), "w", encoding="utf-8") as f:
         json.dump(kvx_json_data, f, indent=4, ensure_ascii=False)
 
-    # 2. Şablon Kodları Seçme
-    main_code = ""
     if p_type == "driver":
-        main_code = """#include <kdf.h>
-
-static KernelAPI* k_api = nullptr;
-
-__attribute__((used)) int driver_read(void* buffer, uint32_t size) {
-    (void)buffer; (void)size;
+        main_code = f"""#include <kernel/kdf.h>
+int driver_init(KernelAPI* api, KDF_Operations* ops);
+__attribute__((section(".text.head"))) __attribute__((used))
+KDF_Header driver_header = {{ KDF_MAGIC, 0x00000001, "{name}", (uint32_t)(void*)driver_init, 0, 0 }};
+static KernelAPI* g_api = 0;
+int driver_read(void* buffer, uint32_t size) {{
+    if (!buffer || size == 0) return -1;
+    const char* msg = "Hello from {name}!\\n";
+    uint32_t len = 0; char* char_buf = (char*)buffer;
+    while (msg[len] != '\\0' && len < (size - 1)) {{ char_buf[len] = msg[len]; len++; }}
+    char_buf[len] = '\\0';
+    return (int)len;
+}}
+int driver_init(KernelAPI* api, KDF_Operations* ops) {{
+    g_api = api;
+    if (g_api && g_api->printk) g_api->printk("[KDF] {name} surucusu yuklendi!\\n");
+    if (ops) {{ ops->read = driver_read; ops->write = 0; ops->control = 0; }}
     return 0;
-}
+}}
+"""
+        with open(os.path.join(src_dir, "main.c"), "w", encoding="utf-8") as f:
+            f.write(main_code)
 
-extern "C" __attribute__((used)) int driver_init(KernelAPI* api, KDF_Operations* ops);
+    elif p_type == "de":
+        os.makedirs(include_dir, exist_ok=True)
+        runtime_dir = os.path.join(src_dir, "runtime")
+        os.makedirs(runtime_dir, exist_ok=True)
+        lib_dir = os.path.join(src_dir, "lib")
+        os.makedirs(lib_dir, exist_ok=True)
+        vscode_dir = os.path.join(target_dir, ".vscode")
+        os.makedirs(vscode_dir, exist_ok=True)
+
+        # 1. .vscode/c_cpp_properties.json
+        c_cpp_properties_content = """{
+    "configurations": [
+        {
+            "name": "Linux",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "${workspaceFolder}/include/**",
+                "${userHome}/.kuvix/sdk/include"
+            ],
+            "defines": [],
+            "compilerPath": "/usr/bin/clang",
+            "cStandard": "c17",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "linux-clang-x64"
+        }
+    ],
+    "version": 4
+}
+"""
+        with open(os.path.join(vscode_dir, "c_cpp_properties.json"), "w", encoding="utf-8") as f:
+            f.write(c_cpp_properties_content)
+
+        # 2. linker.ld
+        linker_content = """ENTRY(_start)
+
+SECTIONS
+{
+    . = 0x3000000; /* 48 MB adresi (Kernel Heap'in üstünde, RAM sınırları içinde) */
+
+    .text : {
+        *(.text._start)
+        *(.text*)
+    }
+
+    .rodata : {
+        *(.rodata*)
+    }
+
+    .data : {
+        *(.data*)
+    }
+
+    .bss : {
+        *(.bss*)
+    }
+}
+"""
+        with open(os.path.join(target_dir, "linker.ld"), "w", encoding="utf-8") as f:
+            f.write(linker_content)
+
+        # 3. entry.s
+        entry_s_code = """.global _start
+.extern app_main
+
+.section .text._start
+_start:
+    # cdecl: Loader 'call' ile çağırdıysa [esp + 4] konumundaki DE_API* pointer'ını aktar
+    pushl 4(%esp)
+    call app_main
+    addl $4, %esp
+
+    # app_main geri dönerse işlemciyi güvenli döngüye al (Triple Fault'u önler)
+.loop:
+    cli
+    hlt
+    jmp .loop
+"""
+        with open(os.path.join(runtime_dir, "entry.s"), "w", encoding="utf-8") as f:
+            f.write(entry_s_code)
+
+        # 4. Runtime.cpp
+        runtime_code = """#include <stdint.h>
 
 extern "C" {
-    __attribute__((section(".text.head"))) __attribute__((used)) 
-    KDF_Header driver_header = {
-        .magic = KDF_MAGIC,
-        .driver_version = 0x00000001,
-        .driver_name = \"""" + name + """\",
-        .init_offset = (uint32_t)(void*)driver_init, 
-        .exit_offset = 0,
-        .code_size = 0
-    };
-}
-
-extern "C" __attribute__((used)) int driver_init(KernelAPI* api, KDF_Operations* ops) {
-    k_api = api;
-    if (ops) {
-        ops->read = driver_read;
+    void __cxa_pure_virtual() { while (1) { asm volatile("hlt"); } }
+    int __cxa_atexit(void (*destructor)(void *), void *arg, void *dso_handle) {
+        (void)destructor; (void)arg; (void)dso_handle;
+        return 0;
     }
-    return 0;
+    void* __dso_handle = 0;
 }
 """
-    elif p_type == "app" and sub_type == "gui":
-        main_code = """#include <dedk.h>
+        with open(os.path.join(runtime_dir, "Runtime.cpp"), "w", encoding="utf-8") as f:
+            f.write(runtime_code)
+
+        # 5. include/draw_text.hpp
+        hpp_draw_code = r"""#ifndef DRAW_TEXT_HPP
+#define DRAW_TEXT_HPP
+
+#include <kernel/drivers/video/de_api.h>
+#include <stdint.h>
+
+#define AUTO_STR(str_val) ({ \
+    const char* __ptr; \
+    asm volatile ( \
+        "call 1f\n\t" \
+        ".asciz \"" str_val "\"\n\t" \
+        "1:\n\t" \
+        "pop %0\n\t" \
+        : "=r"(__ptr) \
+    ); \
+    __ptr; \
+})
+
+void draw_text_safe_internal(DE_API* api, int x, int y, const char* str, uint32_t color);
+
+#define draw_text_safe(api, x, y, str, color) \
+    draw_text_safe_internal(api, x, y, AUTO_STR(str), color)
+
+#endif
+"""
+        with open(os.path.join(include_dir, "draw_text.hpp"), "w", encoding="utf-8") as f:
+            f.write(hpp_draw_code)
+
+        # 6. include/input.h
+        hpp_input_code = """#ifndef INPUT_H
+#define INPUT_H
+
+#include <kernel/drivers/video/de_api.h>
+#include <stdint.h>
+
+enum KeyCode : uint8_t {
+    KEY_NONE      = 0x00,
+    KEY_ENTER     = 0x0D,
+    KEY_ESCAPE    = 0x1B,
+    KEY_BACKSPACE = 0x08,
+    KEY_LCTRL     = 0x1D,
+    KEY_LSHIFT    = 0x2A,
+    KEY_RSHIFT    = 0x36,
+    KEY_LALT      = 0x38,
+    KEY_SUPER     = 0x5B
+};
+
+enum KeyModifier : uint8_t {
+    MOD_NONE  = 0,
+    MOD_SHIFT = 1 << 0,
+    MOD_CTRL  = 1 << 1,
+    MOD_ALT   = 1 << 2,
+    MOD_SUPER = 1 << 3
+};
+
+class Input {
+private:
+    static uint8_t modifiers;
+    static bool keys[256];
+
+public:
+    static void poll(DE_API* api);
+    static bool is_key_down(uint8_t key);
+    static bool is_ctrl();
+    static bool is_shift();
+    static bool is_alt();
+    static bool is_super();
+    static bool is_combo(uint8_t modifier_flags, uint8_t key);
+};
+
+#endif
+"""
+        with open(os.path.join(include_dir, "input.h"), "w", encoding="utf-8") as f:
+            f.write(hpp_input_code)
+
+        # 7. src/lib/draw_text.cpp
+        cpp_draw_code = r"""#include "../../include/draw_text.hpp"
+
+void draw_text_safe_internal(DE_API* api, int x, int y, const char* str, uint32_t color) {
+    if (!api || !api->draw_text || !str) return;
+
+    int len = 0;
+    while (str[len] != '\0' && len < 255) {
+        len++;
+    }
+
+    if (len == 0) return;
+
+    char reversed[256];
+    for (int i = 0; i < len; i++) {
+        reversed[i] = str[len - 1 - i];
+    }
+    reversed[len] = '\0';
+
+    api->draw_text(x, y, reversed, color);
+}
+"""
+        with open(os.path.join(lib_dir, "draw_text.cpp"), "w", encoding="utf-8") as f:
+            f.write(cpp_draw_code)
+
+        # 8. src/lib/input.cpp
+        cpp_input_code = """#include "../../include/input.h"
+
+uint8_t Input::modifiers = MOD_NONE;
+bool Input::keys[256] = { false };
+
+void Input::poll(DE_API* api) {
+    if (!api || !api->get_key) return;
+
+    for (int i = 0; i < 16; i++) {
+        char raw = api->get_key();
+        uint8_t code = (uint8_t)raw;
+
+        if (code == 0 || code == 0xFF) {
+            break;
+        }
+
+        bool is_release = (code & 0x80) != 0;
+        uint8_t key = code & 0x7F;
+
+        keys[key] = !is_release;
+
+        if (key == KEY_LCTRL) {
+            if (is_release) modifiers &= ~MOD_CTRL;
+            else            modifiers |= MOD_CTRL;
+        }
+        else if (key == KEY_LSHIFT || key == KEY_RSHIFT) {
+            if (is_release) modifiers &= ~MOD_SHIFT;
+            else            modifiers |= MOD_SHIFT;
+        }
+        else if (key == KEY_LALT) {
+            if (is_release) modifiers &= ~MOD_ALT;
+            else            modifiers |= MOD_ALT;
+        }
+        else if (key == KEY_SUPER) {
+            if (is_release) modifiers &= ~MOD_SUPER;
+            else            modifiers |= MOD_SUPER;
+        }
+    }
+}
+
+bool Input::is_key_down(uint8_t key) { return keys[key]; }
+bool Input::is_ctrl()                { return (modifiers & MOD_CTRL) != 0; }
+bool Input::is_shift()               { return (modifiers & MOD_SHIFT) != 0; }
+bool Input::is_alt()                 { return (modifiers & MOD_ALT) != 0; }
+bool Input::is_super()               { return (modifiers & MOD_SUPER) != 0; }
+
+bool Input::is_combo(uint8_t modifier_flags, uint8_t key) {
+    return (modifiers == modifier_flags) && keys[key];
+}
+"""
+        with open(os.path.join(lib_dir, "input.cpp"), "w", encoding="utf-8") as f:
+            f.write(cpp_input_code)
+
+        # 9. src/main.cpp
+        main_code = r"""#include <kernel/drivers/video/de_api.h>
+
+extern "C" void app_main(DE_API* api) {
+    if (!api) return;
+
+    // Ekranı koyu mor/mavi renkle temizle (0x002B2D42)
+    if (api->clear_screen) {
+        api->clear_screen(0x002B2D42);
+    }
+
+    // Çift tamponu (double buffer) ekrana yansıt
+    if (api->update_display) {
+        api->update_display();
+    }
+
+    // Hemen TTY'ye geri dönmemesi için bir tuşa basılmasını bekle
+    if (api->get_key) {
+        while (true) {
+            char k = api->get_key();
+            if (k != 0) {
+                break;
+            }
+        }
+    }
+}
+"""
+        with open(os.path.join(src_dir, "main.cpp"), "w", encoding="utf-8") as f:
+            f.write(main_code)
+
+        print(f"{GREEN}{BOLD}[+][DE] '{target_dir}' temiz C++ SDK modülü başarıyla oluşturuldu!{RESET}")
+        return True
+
+    else:
+        if sub_type == "gui":
+            main_code = f"""#include <dedk.h>
 #include <kvxgfx.h>
-
-int main(int argc, char** argv) {
+#include <string.h>
+int main(int argc, char** argv) {{
     (void)argc; (void)argv;
-    
-    // DEDK üzerinden Grafik Penceresi oluşturma şablonu
-    Window* win = create_window(\"""" + name + """\", 640, 480);
+    Window* win = create_window("{name}", 640, 480);
     if (!win) return -1;
-
-    while (window_is_open(win)) {
+    while (window_is_open(win)) {{
         window_clear(win, 0xFFFFFFFF);
-        draw_text(win, "KuvixOS GUI Uygulaması", 50, 50, 0x00000000);
+        draw_text(win, "KuvixOS DEDK Pencere Uygulamasi", 50, 50, 0x00000000);
         window_present(win);
-    }
+    }}
     return 0;
-}
+}}
 """
-    else: # app-cli veya de
-        main_code = """#include <stdio.h>
-
+        else:
+            main_code = """#include <stdio.h>
+#include <string.h>
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
     printf("Merhaba KuvixOS! Bu bir CLI uygulamasidir.\\n");
     return 0;
 }
 """
-
-    with open(os.path.join(src_dir, "main.cpp"), "w", encoding="utf-8") as f:
-        f.write(main_code)
-
-    # 3. Akıllı Makefile Bırakma
-    makefile_content = f"""# kvx tarafından otomatik üretilen derleme motoru
-TARGET = {name}
-TYPE = {p_type}
-SUB_TYPE = {sub_type}
-
-CXX = i686-elf-g++
-OBJCOPY = i686-elf-objcopy
-
-CXXFLAGS = -O2 -Wall -Wextra -ffreestanding -fno-exceptions -fno-rtti
-LDFLAGS = -nostdlib
-
-ifeq ($(TYPE),driver)
-\tOUTPUT = $(TARGET).kdf
-else ifeq ($(SUB_TYPE),gui)
-\tOUTPUT = $(TARGET).kapp
-else
-\tOUTPUT = $(TARGET).bin
-endif
-
-all: $(OUTPUT)
-
-$(OUTPUT): src/main.cpp
-\t$(CXX) $(CXXFLAGS) -c src/main.cpp -o main.o
-\t$(CXX) $(LDFLAGS) main.o -o $(TARGET).elf
-\t$(OBJCOPY) -O binary $(TARGET).elf $(OUTPUT)
-
-clean:
-\trm -f *.o *.elf $(OUTPUT)
-"""
-    with open(os.path.join(target_dir, "Makefile"), "w", encoding="utf-8") as f:
-        f.write(makefile_content)
+        with open(os.path.join(src_dir, "main.cpp"), "w", encoding="utf-8") as f:
+            f.write(main_code)
 
     print(f"{GREEN}{BOLD}[+][{p_type.upper()}-{sub_type.upper()}] '{target_dir}' başarıyla oluşturuldu!{RESET}")
     return True
 
-def main():
-    print_logo()
+def clean_project(project_dir):
+    target_dir = os.path.abspath(project_dir)
+    json_path = os.path.join(target_dir, "kvx.json")
     
+    name = os.path.basename(target_dir)
+    if os.path.exists(json_path):
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                jdata = json.load(f)
+                name = jdata.get("name", name)
+        except:
+            pass
+
+    print(f"{CYAN}{BOLD}[*] Proje temizleniyor: {target_dir}{RESET}")
+    
+    build_path = os.path.join(target_dir, "build")
+    if os.path.exists(build_path):
+        shutil.rmtree(build_path)
+        
+    kde_file = os.path.join(target_dir, f"{name}.kde")
+    if os.path.exists(kde_file):
+        os.remove(kde_file)
+        
+    bin_file = os.path.join(target_dir, f"{name}.bin")
+    if os.path.exists(bin_file):
+        os.remove(bin_file)
+
+    print(f"{GREEN}{BOLD}[+] Temizleme başarıyla tamamlandı!{RESET}")
+
+def main():
     parser = argparse.ArgumentParser(description="KuvixOS CLI App & Driver SDK Tool")
     subparsers = parser.add_subparsers(dest="command")
 
-    # init komutu (Interaktif mod)
     subparsers.add_parser("init", help="Yeni bir KuvixOS projesini interaktif olarak başlatır")
 
-    # create komutu (Parametreli hızlı mod)
-    create_parser = subparsers.add_parser("create", help="Parametrelerle hızlı proje oluşturur")
-    create_parser.add_argument("-t", "--type", choices=["driver", "app-cli", "app-gui", "de"], required=True, help="Proje türü")
-    create_parser.add_argument("-n", "--name", required=True, help="Proje adı")
-    create_parser.add_argument("-v", "--version", default="1.0.0", help="Proje sürümü")
-    create_parser.add_argument("-a", "--author", default="Anıl Enes Erden", help="Geliştirici adı")
-    create_parser.add_argument("-d", "--dir", default=".", help="Oluşturulacak dizin")
+    create_parser = subparsers.add_parser("create", help="Projeyi parametrelerle veya interaktif olarak oluşturur")
+    create_parser.add_argument("-t", "--type", choices=["driver", "app-cli", "app-gui", "de"])
+    create_parser.add_argument("-n", "--name")
+    create_parser.add_argument("-v", "--version", default="1.0.0")
+    create_parser.add_argument("-a", "--author", default="Anıl Enes Erden")
+    create_parser.add_argument("-d", "--dir", default=".")
+
+    build_parser = subparsers.add_parser("build", help="Projeyi derler")
+    build_parser.add_argument("-d", "--dir", default=".")
+    build_parser.add_argument("-c", "--clean", action="store_true", help="Derlemeden önce temizlik yapar")
+
+    clean_parser = subparsers.add_parser("clean", help="Projedeki build klasörünü me çıktıları temizler")
+    clean_parser.add_argument("-d", "--dir", default=".")
 
     args = parser.parse_args()
 
-    if args.command == "init":
-        # İnteraktif Seçim Ekranları
+    if args.command in ["init", "create", "build", "clean"]:
+        print_logo()
+
+    if args.command == "init" or (args.command == "create" and not getattr(args, 'type', None)):
         chosen_type = interactive_menu("Proje Türünü Seçin", ["driver", "app-cli", "app-gui", "de"])
-        p_name = input(f"{BOLD}? Proje Adı (Örn: ps2_mouse): {RESET}").strip()
-        p_version = input(f"{BOLD}? Sürüm (Varsayılan: 1.0.0): {RESET}").strip() or "1.0.0"
-        p_author = input(f"{BOLD}? Geliştirici (Varsayılan: Anıl Enes Erden): {RESET}").strip() or "Anıl Enes Erden"
-        p_dir = input(f"{BOLD}? Klasör Yolu (Varsayılan: mevcut dizin '.'): {RESET}").strip() or "."
-        
+        p_name = input(f"{BOLD}? Proje Adı: {RESET}").strip()
+        if not p_name: return
+        p_version = input(f"{BOLD}? Sürüm (1.0.0): {RESET}").strip() or "1.0.0"
+        p_author = input(f"{BOLD}? Geliştirici: {RESET}").strip() or "Anıl Enes Erden"
+        p_dir = input(f"{BOLD}? Klasör Yolu (.): {RESET}").strip() or "."
         p_type = "driver" if chosen_type == "driver" else "app" if "app" in chosen_type else chosen_type
         sub_type = "gui" if "gui" in chosen_type else "cli"
-        
         create_project_structure(p_dir, p_name, p_type, sub_type, p_version, p_author)
 
     elif args.command == "create":
         p_type = "driver" if args.type == "driver" else "app" if "app" in args.type else args.type
         sub_type = "gui" if "gui" in args.type else "cli"
         create_project_structure(args.dir, args.name, p_type, sub_type, args.version, args.author)
-        
+
+    elif args.command == "build":
+        build_project(args.dir, clean_first=args.clean)
+
+    elif args.command == "clean":
+        clean_project(args.dir)
     else:
         parser.print_help()
 
