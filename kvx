@@ -653,6 +653,20 @@ extern "C" void app_main(DE_API* api) {
 
     uint32_t bg_color = 0x002B2D42; // Koyu mor/mavi arka plan
 
+    // Örnek: read_file API kullanımı ile dosya okuma ve loglama
+    if (api->log && api->read_file) {
+        api->log("[DE-App] /sys/themes/theme.kth okunuyor...\n");
+        char buffer[256];
+        int bytes = api->read_file("/sys/themes/theme.kth", buffer, sizeof(buffer) - 1);
+        if (bytes > 0) {
+            buffer[bytes] = '\0';
+            api->log("[DE-App] Dosya başarıyla okundu:\n");
+            api->log(buffer);
+        } else {
+            api->log("[DE-App] HATA: Dosya okunamadı!\n");
+        }
+    }
+
     CursorState cursor;
     cursor_init(&cursor, "/sys/themes/arrow-cursor.kbi", 16, 16, bg_color);
 
