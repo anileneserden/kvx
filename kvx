@@ -6,7 +6,7 @@ import argparse
 import subprocess
 import shutil
 
-VERSION = "0.1.8"
+VERSION = "0.1.1"
 
 GREEN = "\033[92m"
 YELLOW = "\033[93m"
