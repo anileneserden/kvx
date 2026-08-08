@@ -542,7 +542,7 @@ public:
         with open(os.path.join(include_dir, "window.hpp"), "w", encoding="utf-8") as f:
             f.write(hpp_window_code)
 
-        # 9. include/grid.hpp (Yeni Eklenen Grid Modülü Header Dosyası)
+        # 9. include/grid.hpp
         hpp_grid_code = """#ifndef GRID_HPP
 #define GRID_HPP
 
@@ -556,7 +556,7 @@ void draw_grid_lines(DE_API* api, uint32_t screen_width, uint32_t screen_height,
         with open(os.path.join(include_dir, "grid.hpp"), "w", encoding="utf-8") as f:
             f.write(hpp_grid_code)
 
-        # 10. include/widget.hpp (Yeni Eklenen Widget Modülü Header Dosyası)
+        # 10. include/widget.hpp
         hpp_widget_code = """#ifndef WIDGET_HPP
 #define WIDGET_HPP
 
@@ -713,7 +713,7 @@ void cursor_render(DE_API* api, CursorState* state) {
         with open(os.path.join(lib_dir, "cursor.cpp"), "w", encoding="utf-8") as f:
             f.write(cpp_cursor_code)
 
-        # 14. src/lib/grid.cpp (Yeni Eklenen Grid Modülü Kaynak Dosyası)
+        # 14. src/lib/grid.cpp
         cpp_grid_code = """#include <grid.hpp>
 
 void draw_grid_lines(DE_API* api, uint32_t screen_width, uint32_t screen_height, int cell_size, uint32_t grid_color) {
@@ -731,7 +731,7 @@ void draw_grid_lines(DE_API* api, uint32_t screen_width, uint32_t screen_height,
         with open(os.path.join(lib_dir, "grid.cpp"), "w", encoding="utf-8") as f:
             f.write(cpp_grid_code)
 
-        # 15. src/main.cpp (Pencere, Widget, Grid ve Tema Destekli Şablon)
+        # 15. src/main.cpp (Dizin Dosya Sayısı ve İsim Sorgulama Örnek Destekli Şablon)
         main_code = r"""#include <kernel/drivers/video/de_api.h>
 #include <grid.hpp>
 #include <window.hpp>
@@ -739,6 +739,20 @@ void draw_grid_lines(DE_API* api, uint32_t screen_width, uint32_t screen_height,
 
 extern "C" void app_main(DE_API* api) {
     if (!api) return;
+
+    // --- DİZİN DOSYA SAYISINI VE İSİMLERİNİ SORGULAMA ÖRNEĞİ ---
+    if (api->get_file_count && api->get_file_name_at && api->log) {
+        const char* target_dir = "/usr/share/applications";
+        int file_count = api->get_file_count(target_dir);
+        
+        // Örnek Loglama ve İsim Okuma Döngüsü
+        for (int i = 0; i < file_count; i++) {
+            char filename[32];
+            if (api->get_file_name_at(target_dir, i, filename, sizeof(filename))) {
+                // Her bir dosyayı burada işleyebilir veya loglayabilirsin
+            }
+        }
+    }
 
     // Varsayılan Tema Yapılandırması
     WindowTheme current_theme = {
@@ -820,7 +834,7 @@ extern "C" void app_main(DE_API* api) {
         with open(os.path.join(src_dir, "main.cpp"), "w", encoding="utf-8") as f:
             f.write(main_code)
 
-        # 16. src/lib/widget.cpp (Yeni Eklenen Widget Modülü Kaynak Dosyası)
+        # 16. src/lib/widget.cpp
         cpp_widget_code = """#include <widget.hpp>
 
 Widget::Widget(WidgetType t, int px, int py, int pw, int ph, uint32_t bg, uint32_t fg, int radius, const char* txt)
