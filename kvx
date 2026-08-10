@@ -100,7 +100,6 @@ def build_project(project_dir, clean_first=False):
     sub_type = "cli"
     name = os.path.basename(target_dir)
     
-    # kvx.json içerisinden bayrakları oku
     custom_cflags = ""
     custom_ldflags = ""
     
@@ -118,8 +117,10 @@ def build_project(project_dir, clean_first=False):
 
     print(f"{CYAN}{BOLD}[*] Proje derleniyor: {target_dir}{RESET}")
 
+    # p_type app_gui veya sub_type gui olan (veya genel app türündeki) projeler için i686
+    target_arch = "i686" if p_type in ["app", "app_gui"] or sub_type == "gui" else "i386"
+
     if p_type == "de":
-        # JSON'da linker_flags tanımlıysa onu kullan, yoksa varsayılanı ata
         ldflags = custom_ldflags if custom_ldflags else "-m elf_i386 -T linker.ld --gc-sections -e _start -s"
         
         makefile_content = f"""TARGET = {name}.kde
@@ -128,7 +129,7 @@ AS = i686-elf-as
 CXX = i686-elf-g++
 LD = i686-elf-ld
 
-CXXFLAGS = -m32 -Wa,--32 -march=i386 -c -ffreestanding -fno-pic -fno-pie -mno-sse -mno-mmx -mno-80387 \\
+CXXFLAGS = -m32 -Wa,--32 -march={target_arch} -c -ffreestanding -fno-pic -fno-pie -mno-sse -mno-mmx -mno-80387 \\
            -fno-stack-protector -fno-builtin -fno-asynchronous-unwind-tables \\
            -ffunction-sections -fdata-sections -Iinclude -I$(KUVIX_SDK_INC) \\
            -fno-rtti -fno-exceptions {custom_cflags}
@@ -161,23 +162,24 @@ clean:
 """
     else:
         ldflags = custom_ldflags if custom_ldflags else "-m32 -nostdlib"
+        
+        cleaned_cflags = custom_cflags.replace("-march=i686", "").replace("-m32", "").replace("-ffreestanding", "").strip()
+        
         makefile_content = f"""TARGET = {name}
 SUB_TYPE = {sub_type}
 KUVIX_SDK_INC = $(HOME)/.kuvix/sdk/include
-CXX = i686-elf-g++
 CC = i686-elf-gcc
 OBJCOPY = i686-elf-objcopy
 
-CFLAGS = -m32 -march=i386 -pipe -O0 -Wall -Wextra -ffreestanding -fno-stack-protector -fno-pie -I$(KUVIX_SDK_INC) {custom_cflags}
-CXXFLAGS = -m32 -march=i386 -pipe -Wall -Wextra -ffreestanding -fno-exceptions -fno-rtti -fno-stack-protector -fomit-frame-pointer -fno-asynchronous-unwind-tables -fno-pie -fno-pic -fno-ident -I$(KUVIX_SDK_INC) {custom_cflags}
+CFLAGS = -m32 -march={target_arch} -ffreestanding -I$(KUVIX_SDK_INC) {cleaned_cflags}
 LDFLAGS = {ldflags}
 
 OUTPUT = $(TARGET).bin
 all: $(OUTPUT)
 $(OUTPUT):
 \t@mkdir -p build
-\t$(CXX) $(CXXFLAGS) -c src/main.cpp -o build/main.o
-\t$(CXX) $(LDFLAGS) build/main.o -o $(TARGET).elf
+\t$(CC) $(CFLAGS) -c src/main.cpp -o build/main.o
+\t$(CC) {ldflags} build/main.o -o $(TARGET).elf
 \t$(OBJCOPY) -O binary $(TARGET).elf $(OUTPUT)
 clean:
 \trm -rf build/* $(TARGET).elf $(OUTPUT)
@@ -254,6 +256,108 @@ int driver_init(KernelAPI* api, KDF_Operations* ops) {{
 """
         with open(os.path.join(src_dir, "main.c"), "w", encoding="utf-8") as f:
             f.write(main_code)
+
+    elif p_type == "app_gui":
+        os.makedirs(include_dir, exist_ok=True)
+        runtime_dir = os.path.join(src_dir, "runtime")
+        os.makedirs(runtime_dir, exist_ok=True)
+        lib_dir = os.path.join(src_dir, "lib")
+        os.makedirs(lib_dir, exist_ok=True)
+        vscode_dir = os.path.join(target_dir, ".vscode")
+        os.makedirs(vscode_dir, exist_ok=True)
+
+        # 1. kvx.json (Uygulama Manifestosu)
+        kvx_json_data = {
+            "name": name,
+            "type": "app_gui",
+            "sub_type": sub_type,
+            "version": version,
+            "author": author,
+            "compiler_flags": "-std=c++17 -O2 -Wall",
+            "linker_flags": default_ldflags
+        }
+        # Not: Yukarıdaki genel kvx_json_data yazma adımından bağımsız, bu türe özel güncelleyebilirsin.
+
+        # 2. layout.json (Arayüz Şablonu)
+        layout_json_content = """{
+  "window": {
+    "title": "%s - KuvixOS",
+    "width": 400,
+    "height": 300
+  },
+  "elements": [
+    {
+      "type": "Label",
+      "name": "lblStatus",
+      "text": "KuvixOS KEF Sistemine Hos Geldiniz!",
+      "x": 20,
+      "y": 40
+    },
+    {
+      "type": "Button",
+      "name": "button1",
+      "text": "Tikla ve Calistir",
+      "x": 20,
+      "y": 100,
+      "width": 160,
+      "height": 35
+    }
+  ]
+}
+""" % name
+        with open(os.path.join(target_dir, "layout.json"), "w", encoding="utf-8") as f:
+            f.write(layout_json_content)
+
+        # 3. .vscode/c_cpp_properties.json
+        c_cpp_properties_content = """{
+    "configurations": [
+        {
+            "name": "KuvixOS-Freestanding",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "${workspaceFolder}/include/**",
+                "${userHome}/.kuvix/sdk/include"
+            ],
+            "defines": ["__FREESTANDING__"],
+            "compilerPath": "/usr/bin/g++",
+            "cStandard": "c17",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "linux-gcc-x64"
+        }
+    ],
+    "version": 4
+}
+"""
+        with open(os.path.join(vscode_dir, "c_cpp_properties.json"), "w", encoding="utf-8") as f:
+            f.write(c_cpp_properties_content)
+
+        # 4. src/main.cpp (#include <kuvix.h> ve Event Mimarisi)
+        main_code = """#include <kuvix.h>
+
+// Butona tıklandığında çalışacak callback fonksiyonu
+void onButtonClicked() {
+    // SDK üzerinden element metnini değiştirme
+    setElementText("lblStatus", "Basariyla .kef uygulamasi calistirildi!");
+}
+
+int main() {
+    // 1. JSON arayüz şablonunu SDK üzerinden yükle
+    loadUI("layout.json");
+
+    // 2. Elementi seç ve olay (event) bağla
+    getElementByName("button1").event("click", onButtonClicked);
+
+    // 3. Uygulama ana döngüsünü başlat
+    runApp();
+
+    return 0;
+}
+"""
+        with open(os.path.join(src_dir, "main.cpp"), "w", encoding="utf-8") as f:
+            f.write(main_code)
+
+        print(f"{GREEN}{BOLD}[+][APP-GUI] '{target_dir}' JSON tabanlı DOM mimarisiyle başarıyla oluşturuldu!{RESET}")
+        return True
 
     elif p_type == "de":
         os.makedirs(include_dir, exist_ok=True)
