@@ -409,31 +409,7 @@ def create_project_structure(path, name, p_type, sub_type, version, author):
     with open(os.path.join(target_dir, "kvx.json"), "w", encoding="utf-8") as f:
         json.dump(kvx_json_data, f, indent=4, ensure_ascii=False)
 
-    if p_type == "driver":
-        main_code = f"""#include <kernel/kdf.h>
-int driver_init(KernelAPI* api, KDF_Operations* ops);
-__attribute__((section(".text.head"))) __attribute__((used))
-KDF_Header driver_header = {{ KDF_MAGIC, 0x00000001, "{name}", (uint32_t)(void*)driver_init, 0, 0 }};
-static KernelAPI* g_api = 0;
-int driver_read(void* buffer, uint32_t size) {{
-    if (!buffer || size == 0) return -1;
-    const char* msg = "Hello from {name}!\\n";
-    uint32_t len = 0; char* char_buf = (char*)buffer;
-    while (msg[len] != '\\0' && len < (size - 1)) {{ char_buf[len] = msg[len]; len++; }}
-    char_buf[len] = '\\0';
-    return (int)len;
-}}
-int driver_init(KernelAPI* api, KDF_Operations* ops) {{
-    g_api = api;
-    if (g_api && g_api->printk) g_api->printk("[KDF] {name} surucusu yuklendi!\\n");
-    if (ops) {{ ops->read = driver_read; ops->write = 0; ops->control = 0; }}
-    return 0;
-}}
-"""
-        with open(os.path.join(src_dir, "main.c"), "w", encoding="utf-8") as f:
-            f.write(main_code)
-
-    elif p_type == "app_gui":
+    if p_type == "app_gui":
         os.makedirs(include_dir, exist_ok=True)
         runtime_dir = os.path.join(src_dir, "runtime")
         os.makedirs(runtime_dir, exist_ok=True)
@@ -1304,7 +1280,7 @@ def main():
     subparsers.add_parser("init", help="Yeni bir KuvixOS projesini interaktif olarak başlatır")
 
     create_parser = subparsers.add_parser("create", help="Projeyi parametrelerle veya interaktif olarak oluşturur")
-    create_parser.add_argument("-t", "--type", choices=["driver", "app-cli", "app-gui", "de"])
+    create_parser.add_argument("-t", "--type", choices=["app-cli", "app-gui", "de"])
     create_parser.add_argument("-n", "--name")
     create_parser.add_argument("-v", "--version", default="1.0.0")
     create_parser.add_argument("-a", "--author", default="Anıl Enes Erden")
@@ -1323,18 +1299,18 @@ def main():
         print_logo()
 
     if args.command == "init" or (args.command == "create" and not getattr(args, 'type', None)):
-        chosen_type = interactive_menu("Proje Türünü Seçin", ["driver", "app-cli", "app-gui", "de"])
+        chosen_type = interactive_menu("Proje Türünü Seçin", ["app-cli", "app-gui", "de"])
         p_name = input(f"{BOLD}? Proje Adı: {RESET}").strip()
         if not p_name: return
         p_version = input(f"{BOLD}? Sürüm (1.0.0): {RESET}").strip() or "1.0.0"
         p_author = input(f"{BOLD}? Geliştirici: {RESET}").strip() or "Anıl Enes Erden"
         p_dir = input(f"{BOLD}? Klasör Yolu (.): {RESET}").strip() or "."
-        p_type = "driver" if chosen_type == "driver" else ("app_cli" if chosen_type == "app-cli" else ("app_gui" if chosen_type == "app-gui" else chosen_type))
+        p_type = "app_cli" if chosen_type == "app-cli" else ("app_gui" if chosen_type == "app-gui" else chosen_type)
         sub_type = "gui" if "gui" in chosen_type else "cli"
         create_project_structure(p_dir, p_name, p_type, sub_type, p_version, p_author)
 
     elif args.command == "create":
-        p_type = "driver" if args.type == "driver" else ("app_cli" if args.type == "app-cli" else ("app_gui" if args.type == "app-gui" else args.type))
+        p_type = "app_cli" if args.type == "app-cli" else ("app_gui" if args.type == "app-gui" else args.type)
         sub_type = "gui" if "gui" in args.type else "cli"
         create_project_structure(args.dir, args.name, p_type, sub_type, args.version, args.author)
 
