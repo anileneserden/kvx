@@ -5,8 +5,14 @@ import json
 import argparse
 import subprocess
 import shutil
+import struct
 
-VERSION = "0.1.1"
+try:
+    from elftools.elf.elffile import ELFFile
+except ImportError:
+    ELFFile = None
+
+VERSION = "0.1.2"
 
 GREEN = "\033[92m"
 YELLOW = "\033[93m"
@@ -61,6 +67,19 @@ void draw_text(void* win, const char* text, int x, int y, unsigned int color);
 #endif
 """)
 
+    kef_h_path = os.path.join(SDK_INCLUDE_DIR, "kef.h")
+    if not os.path.exists(kef_h_path):
+        with open(kef_h_path, "w", encoding="utf-8") as f:
+            f.write("""#pragma once
+#include <stdint.h>
+
+typedef struct {
+    void (*print)(const char* s);
+} kef_api_t;
+
+typedef void (*kef_entry_fn)(kef_api_t* api);
+""")
+
 def interactive_menu(title, options):
     current_idx = 0
     import tty, termios
@@ -92,6 +111,99 @@ def interactive_menu(title, options):
         print("\n")
     return options[current_idx]
 
+KEF_VERSION = 2
+KEF_ARCH_X86_32 = 1
+
+def generate_kef(elf_path, out_path, preferred_addr):
+    if ELFFile is None:
+        print(f"{RED}[Hata] 'pyelftools' kurulu degil. Kurmak icin: pip install pyelftools --break-system-packages{RESET}")
+        return False
+
+    with open(elf_path, "rb") as f:
+        elf = ELFFile(f)
+
+        alloc_sections = []
+        for sec in elf.iter_sections():
+            if sec["sh_flags"] & 0x2:
+                if sec["sh_type"] in ("SHT_PROGBITS", "SHT_NOBITS"):
+                    alloc_sections.append(sec)
+        alloc_sections.sort(key=lambda s: s["sh_addr"])
+
+        code_sections = [s for s in alloc_sections if s["sh_type"] == "SHT_PROGBITS"]
+        bss_sections   = [s for s in alloc_sections if s["sh_type"] == "SHT_NOBITS"]
+
+        if not code_sections:
+            print(f"{RED}[Hata] Yuklenecek (ALLOC) kod section'i bulunamadi.{RESET}")
+            return False
+
+        code_start = code_sections[0]["sh_addr"]
+        code_end = max(s["sh_addr"] + s["sh_size"] for s in code_sections)
+        code_size = code_end - code_start
+
+        code_block = bytearray(code_size)
+        for s in code_sections:
+            off = s["sh_addr"] - code_start
+            data = s.data()
+            code_block[off:off+len(data)] = data
+
+        bss_size = 0
+        if bss_sections:
+            bss_start = min(s["sh_addr"] for s in bss_sections)
+            bss_end = max(s["sh_addr"] + s["sh_size"] for s in bss_sections)
+            bss_size = bss_end - bss_start
+
+        R_386_32 = 1
+        relocs = []
+        for sec in elf.iter_sections():
+            if sec["sh_type"] != "SHT_REL":
+                continue
+            for rel in sec.iter_relocations():
+                if rel["r_info_type"] != R_386_32:
+                    continue
+                r_vaddr = rel["r_offset"]
+                if not (code_start <= r_vaddr < code_end):
+                    continue
+                relocs.append(r_vaddr - code_start)
+        relocs.sort()
+
+        entry_addr = None
+        symtab = elf.get_section_by_name(".symtab")
+        if symtab:
+            for sym in symtab.iter_symbols():
+                if sym.name == "_start":
+                    entry_addr = sym["st_value"]
+                    break
+
+        if entry_addr is None:
+            print(f"{RED}[Hata] '_start' sembolu bulunamadi.{RESET}")
+            return False
+
+        entry_off = entry_addr - preferred_addr
+
+        HEADER_FMT = "<3sBB3xIIII II16s16s"
+        name_bytes = os.path.basename(out_path).encode("utf-8")[:15].ljust(16, b"\0")
+        reserved_bytes = b"\0" * 16
+
+        header_size = struct.calcsize(HEADER_FMT)
+        reloc_off = header_size + len(code_block)
+        reloc_count = len(relocs)
+
+        with open(out_path, "wb") as out:
+            out.write(struct.pack(
+                HEADER_FMT,
+                b"KEF", KEF_VERSION, KEF_ARCH_X86_32,
+                preferred_addr, entry_off,
+                len(code_block), bss_size,
+                reloc_count, reloc_off,
+                name_bytes, reserved_bytes
+            ))
+            out.write(code_block)
+            for off in relocs:
+                out.write(struct.pack("<I", off))
+
+    print(f"{GREEN}[kefgen] code_size={len(code_block)} bss_size={bss_size} reloc_count={reloc_count}{RESET}")
+    return True
+
 def build_project(project_dir, clean_first=False):
     target_dir = os.path.abspath(project_dir)
     json_path = os.path.join(target_dir, "kvx.json")
@@ -120,7 +232,71 @@ def build_project(project_dir, clean_first=False):
     # p_type app_gui veya sub_type gui olan (veya genel app türündeki) projeler için i686
     target_arch = "i686" if p_type in ["app", "app_gui"] or sub_type == "gui" else "i386"
 
-    if p_type == "de":
+    if p_type == "app_cli":
+        load_addr_str = "0x00500000"
+        if os.path.exists(json_path):
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    load_addr_str = json.load(f).get("load_addr", load_addr_str)
+            except:
+                pass
+
+        makefile_content = f"""TARGET = {name}
+KUVIX_SDK_INC = $(HOME)/.kuvix/sdk/include
+CC = i686-elf-gcc
+LD = i686-elf-ld
+
+BUILD = build
+OBJ = $(BUILD)/main.o
+ELF = $(BUILD)/$(TARGET).elf
+
+CFLAGS = -ffreestanding -fno-pic -fno-pie -nostdlib -fno-asynchronous-unwind-tables \\
+         -Wall -Wextra -O2 -I$(KUVIX_SDK_INC) {custom_cflags}
+LDFLAGS = -T linker.ld -nostdlib --emit-relocs
+
+.PHONY: all clean
+
+all: $(ELF)
+
+$(BUILD):
+\tmkdir -p $(BUILD)
+
+$(OBJ): main.c | $(BUILD)
+\t$(CC) $(CFLAGS) -c main.c -o $(OBJ)
+
+$(ELF): $(OBJ) linker.ld
+\t$(LD) $(LDFLAGS) $(OBJ) -o $(ELF)
+
+clean:
+\trm -rf $(BUILD)
+"""
+        temp_makefile_path = os.path.join(target_dir, "Makefile")
+        with open(temp_makefile_path, "w", encoding="utf-8") as f:
+            f.write(makefile_content)
+
+        if clean_first:
+            subprocess.run(["make", "clean"], cwd=target_dir)
+
+        result = subprocess.run(["make"], cwd=target_dir)
+
+        if os.path.exists(temp_makefile_path):
+            os.remove(temp_makefile_path)
+
+        if result.returncode != 0:
+            print(f"{RED}{BOLD}[-] Derleme sirasinda hata olustu!{RESET}")
+            return False
+
+        elf_path = os.path.join(target_dir, "build", f"{name}.elf")
+        kef_path = os.path.join(target_dir, "build", f"{name}.kef")
+        preferred_addr = int(load_addr_str, 16)
+
+        if not generate_kef(elf_path, kef_path, preferred_addr):
+            return False
+
+        print(f"{GREEN}{BOLD}[+] Derleme basariyla tamamlandi! -> {kef_path}{RESET}")
+        return True
+
+    elif p_type == "de":
         ldflags = custom_ldflags if custom_ldflags else "-m elf_i386 -T linker.ld --gc-sections -e _start -s"
         
         makefile_content = f"""TARGET = {name}.kde
@@ -357,6 +533,84 @@ int main() {
             f.write(main_code)
 
         print(f"{GREEN}{BOLD}[+][APP-GUI] '{target_dir}' JSON tabanlı DOM mimarisiyle başarıyla oluşturuldu!{RESET}")
+        return True
+
+    elif p_type == "app_cli":
+        vscode_dir = os.path.join(target_dir, ".vscode")
+        os.makedirs(vscode_dir, exist_ok=True)
+
+        # 1. kvx.json
+        kvx_json_data = {
+            "name": name,
+            "type": "app_cli",
+            "sub_type": "cli",
+            "version": version,
+            "author": author,
+            "load_addr": "0x00500000",
+            "compiler_flags": "-O2 -Wall -Wextra",
+            "linker_flags": ""
+        }
+        with open(os.path.join(target_dir, "kvx.json"), "w", encoding="utf-8") as f:
+            json.dump(kvx_json_data, f, indent=4, ensure_ascii=False)
+
+        # 2. .vscode/c_cpp_properties.json -> SDK include'a isaret eder (yerel include YOK)
+        c_cpp_properties_content = """{
+    "configurations": [
+        {
+            "name": "KuvixOS-Freestanding",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "${userHome}/.kuvix/sdk/include"
+            ],
+            "defines": ["__FREESTANDING__"],
+            "compilerPath": "/usr/bin/gcc",
+            "cStandard": "c17",
+            "intelliSenseMode": "linux-gcc-x86"
+        }
+    ],
+    "version": 4
+}
+"""
+        with open(os.path.join(vscode_dir, "c_cpp_properties.json"), "w", encoding="utf-8") as f:
+            f.write(c_cpp_properties_content)
+
+        # 3. linker.ld
+        linker_content = """ENTRY(_start)
+
+SECTIONS
+{
+    . = 0x00500000;
+
+    .text : {
+        *(.text.start)
+        *(.text*)
+    }
+
+    .rodata : { *(.rodata*) }
+    .data   : { *(.data*) }
+    .bss    : { *(COMMON) *(.bss*) }
+}
+"""
+        with open(os.path.join(target_dir, "linker.ld"), "w", encoding="utf-8") as f:
+            f.write(linker_content)
+
+        # 4. main.c
+        main_code = """#include "kef.h"
+
+__attribute__((section(".text.start")))
+void _start(kef_api_t* api) {
+    void kef_main(kef_api_t* api);
+    kef_main(api);
+}
+
+void kef_main(kef_api_t* api) {
+    api->print("Hello World");
+}
+"""
+        with open(os.path.join(target_dir, "main.c"), "w", encoding="utf-8") as f:
+            f.write(main_code)
+
+        print(f"{GREEN}{BOLD}[+][APP-CLI] '{target_dir}' basariyla olusturuldu!{RESET}")
         return True
 
     elif p_type == "de":
@@ -1075,12 +1329,12 @@ def main():
         p_version = input(f"{BOLD}? Sürüm (1.0.0): {RESET}").strip() or "1.0.0"
         p_author = input(f"{BOLD}? Geliştirici: {RESET}").strip() or "Anıl Enes Erden"
         p_dir = input(f"{BOLD}? Klasör Yolu (.): {RESET}").strip() or "."
-        p_type = "driver" if chosen_type == "driver" else "app" if "app" in chosen_type else chosen_type
+        p_type = "driver" if chosen_type == "driver" else ("app_cli" if chosen_type == "app-cli" else ("app_gui" if chosen_type == "app-gui" else chosen_type))
         sub_type = "gui" if "gui" in chosen_type else "cli"
         create_project_structure(p_dir, p_name, p_type, sub_type, p_version, p_author)
 
     elif args.command == "create":
-        p_type = "driver" if args.type == "driver" else "app" if "app" in args.type else args.type
+        p_type = "driver" if args.type == "driver" else ("app_cli" if args.type == "app-cli" else ("app_gui" if args.type == "app-gui" else args.type))
         sub_type = "gui" if "gui" in args.type else "cli"
         create_project_structure(args.dir, args.name, p_type, sub_type, args.version, args.author)
 
