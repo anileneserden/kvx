@@ -89,13 +89,19 @@ def interactive_menu(title, options):
     try:
         tty.setraw(sys.stdin.fileno())
         while True:
-            sys.stdout.write("\r")
+            # Satırı başa al ve sağdaki tüm eski kalıntıları tamamen temizle (\033[K)
+            sys.stdout.write("\r\033[K")
+            
+            output = ""
             for i, opt in enumerate(options):
                 if i == current_idx:
-                    sys.stdout.write(f"{GREEN}{BOLD}> [x] {opt}{RESET}   ")
+                    output += f"{GREEN}{BOLD}> [x] {opt}{RESET}   "
                 else:
-                    sys.stdout.write(f"  [ ] {opt}   ")
+                    output += f"  [ ] {opt}   "
+            
+            sys.stdout.write(output)
             sys.stdout.flush()
+            
             ch = sys.stdin.read(1)
             if ch == '\x1b':
                 sys.stdin.read(1)
