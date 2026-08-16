@@ -120,7 +120,7 @@ def interactive_menu(title, options):
 KEF_VERSION = 2
 KEF_ARCH_X86_32 = 1
 
-def generate_kef(elf_path, out_path, preferred_addr):
+def generate_kef(elf_path, out_path, preferred_addr, json_path=None):
     if ELFFile is None:
         print(f"{RED}[Hata] 'pyelftools' kurulu degil. Kurmak icin: pip install pyelftools --break-system-packages{RESET}")
         return False
@@ -186,6 +186,20 @@ def generate_kef(elf_path, out_path, preferred_addr):
 
         entry_off = entry_addr - preferred_addr
 
+        # Eğer json_path parametresi verilmediyse, proje dizininde arayalım
+        if not json_path:
+            candidate1 = os.path.join(os.path.dirname(os.path.dirname(elf_path)), "layout.json")
+            candidate2 = os.path.join(os.path.dirname(elf_path), "..", "layout.json")
+            if os.path.exists(candidate1):
+                json_path = candidate1
+            elif os.path.exists(candidate2):
+                json_path = candidate2
+
+        json_bytes = b""
+        if json_path and os.path.exists(json_path):
+            with open(json_path, "r", encoding="utf-8") as jf:
+                json_bytes = jf.read().encode("utf-8")
+
         HEADER_FMT = "<3sBB3xIIII II16s16s"
         name_bytes = os.path.basename(out_path).encode("utf-8")[:15].ljust(16, b"\0")
         reserved_bytes = b"\0" * 16
@@ -206,8 +220,13 @@ def generate_kef(elf_path, out_path, preferred_addr):
             out.write(code_block)
             for off in relocs:
                 out.write(struct.pack("<I", off))
+            
+            # JSON verisi mevcutsa __KFX_JSON__ etiketiyle beraber dosyaya iliştirilir
+            if json_bytes:
+                out.write(b"__KFX_JSON__")
+                out.write(json_bytes)
 
-    print(f"{GREEN}[kefgen] code_size={len(code_block)} bss_size={bss_size} reloc_count={reloc_count}{RESET}")
+    print(f"{GREEN}[kefgen] code_size={len(code_block)} bss_size={bss_size} reloc_count={reloc_count} json_appended={bool(json_bytes)}{RESET}")
     return True
 
 def build_project(project_dir, clean_first=False):
@@ -302,6 +321,80 @@ clean:
         print(f"{GREEN}{BOLD}[+] Derleme basariyla tamamlandi! -> {kef_path}{RESET}")
         return True
 
+    elif p_type == "app_gui":
+        # app_gui projeleri doğrudan .kef üretir
+        load_addr_str = "0x00500000"
+        if os.path.exists(json_path):
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    load_addr_str = json.load(f).get("load_addr", load_addr_str)
+            except:
+                pass
+
+        ldflags = custom_ldflags if custom_ldflags else "-m32 -nostdlib -T linker.ld --emit-relocs"
+
+        makefile_content = f"""TARGET = {name}
+KUVIX_SDK_INC = $(HOME)/.kuvix/sdk/include
+CXX = i686-elf-g++
+LD = i686-elf-ld
+
+CXXFLAGS = -m32 -march={target_arch} -ffreestanding -fno-pic -fno-pie -fno-stack-protector \\
+           -fno-builtin -fno-asynchronous-unwind-tables -Wall -Wextra -O2 \\
+           -Iinclude -I$(KUVIX_SDK_INC) -fno-rtti -fno-exceptions {custom_cflags}
+
+LDFLAGS = {ldflags}
+
+BUILD = build
+SRCS = $(shell find src -type f -name '*.cpp' 2>/dev/null)
+OBJS = $(patsubst src/%.cpp, $(BUILD)/%.o, $(SRCS))
+ELF = $(BUILD)/$(TARGET).elf
+
+.PHONY: all clean
+
+all: $(ELF)
+
+$(BUILD):
+\tmkdir -p $(BUILD)/runtime $(BUILD)/lib
+
+$(BUILD)/%.o: src/%.cpp | $(BUILD)
+\t@mkdir -p $(dir $@)
+\t$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(ELF): $(OBJS) linker.ld
+\t$(LD) $(LDFLAGS) $(OBJS) -o $(ELF)
+
+clean:
+\trm -rf $(BUILD)
+"""
+        temp_makefile_path = os.path.join(target_dir, "Makefile")
+        with open(temp_makefile_path, "w", encoding="utf-8") as f:
+            f.write(makefile_content)
+
+        if clean_first:
+            subprocess.run(["make", "clean"], cwd=target_dir)
+
+        result = subprocess.run(["make"], cwd=target_dir)
+
+        if os.path.exists(temp_makefile_path):
+            os.remove(temp_makefile_path)
+
+        if result.returncode != 0:
+            print(f"{RED}{BOLD}[-] Derleme sırasında hata oluştu!{RESET}")
+            return False
+
+        elf_path = os.path.join(target_dir, "build", f"{name}.elf")
+        kef_path = os.path.join(target_dir, "build", f"{name}.kef")
+        preferred_addr = int(load_addr_str, 16)
+
+        # Doğrudan proje dizinindeki layout.json yolunu verelim
+        project_json_path = os.path.join(target_dir, "layout.json")
+
+        if not generate_kef(elf_path, kef_path, preferred_addr, json_path=project_json_path):
+            return False
+
+        print(f"{GREEN}{BOLD}[+] Derleme başarıyla tamamlandı! -> {kef_path}{RESET}")
+        return True
+
     elif p_type == "de":
         ldflags = custom_ldflags if custom_ldflags else "-m elf_i386 -T linker.ld --gc-sections -e _start -s"
         
@@ -342,6 +435,7 @@ build/%.o: src/%.cpp
 clean:
 \trm -rf build {name}.kde
 """
+        
     else:
         ldflags = custom_ldflags if custom_ldflags else "-m32 -nostdlib"
         
